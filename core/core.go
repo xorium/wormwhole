@@ -9,10 +9,11 @@ import (
 type CommandState string
 
 const (
-	CommandStateUndefined CommandState = "undefined"
-	CommandStateExecuting CommandState = "executing"
-	CommandStateSuccess   CommandState = "success"
-	CommandStateFailed    CommandState = "failed"
+	CommandStateUndefined   CommandState = "undefined"
+	CommandStateExecuting   CommandState = "executing"
+	CommandStateSuccess     CommandState = "success"
+	CommandStateFailed      CommandState = "failed"
+	CommandStateInterrupted CommandState = "interrupted"
 )
 
 const (
@@ -40,6 +41,10 @@ func NewCommand(name string, args ...interface{}) *Command {
 		Args:    args,
 		state:   CommandStateUndefined,
 	}
+}
+
+func (c *Command) String() string {
+	return fmt.Sprintf("%s <%s>", c.Name, c.state)
 }
 
 func (c *Command) SetState(state CommandState) {

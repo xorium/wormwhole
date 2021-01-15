@@ -25,8 +25,13 @@ type Bot struct {
 	Conn *websocket.Conn
 }
 
+func (b *Bot) String() string {
+	return fmt.Sprintf("%s | %s", b.ID, b.IP)
+}
+
 type CommandServer struct {
 	*sync.RWMutex
+	Debug           bool
 	addr            string
 	upgrader        websocket.Upgrader
 	bots            map[string]*Bot
@@ -84,7 +89,9 @@ func (s *CommandServer) removeBot(bot *Bot) {
 func (s *CommandServer) entrypoint(w http.ResponseWriter, r *http.Request) {
 	c, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Println("upgrade ws connection error:", err)
+		if s.Debug {
+			log.Println("upgrade ws connection error:", err)
+		}
 		return
 	}
 	botId := r.Header.Get("X-UUID")
@@ -97,7 +104,9 @@ func (s *CommandServer) entrypoint(w http.ResponseWriter, r *http.Request) {
 		IP:   r.RemoteAddr,
 		Conn: c,
 	}
-	log.Println("bot connected: ", bot)
+	if s.Debug {
+		log.Println("bot connected: ", bot.String())
+	}
 	s.Lock()
 	s.bots[bot.ID] = bot
 	s.Unlock()
@@ -128,7 +137,9 @@ func (s *CommandServer) feedback(w http.ResponseWriter, r *http.Request) {
 	}
 	if respCode != core.CommandResultCodeSuccess {
 		cmd.SetState(core.CommandStateFailed)
-		log.Printf("Command %s resp code: %s\n", commandId, respCode)
+		if s.Debug {
+			log.Printf("Command %s resp code: %s\n", commandId, respCode)
+		}
 	}
 
 	respBody := make([]byte, 0)
@@ -141,6 +152,9 @@ func (s *CommandServer) feedback(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	s.Lock()
+	delete(s.currentCommands, cmd.ID)
+	s.Unlock()
 	go s.onCommandResp(cmd, respBody)
 }
 
@@ -158,7 +172,9 @@ func (s *CommandServer) SendCommand(c *core.Command, bot *Bot) error {
 	s.currentCommands[c.ID] = c
 
 	if err := bot.Conn.WriteJSON(c); err != nil {
-		log.Printf("can't send command %s to bot %s\n", c.Name, bot.ID)
+		if s.Debug {
+			log.Printf("can't send command %s to bot %s\n", c.Name, bot.String())
+		}
 		go s.onDisconnect(bot)
 		s.removeBot(bot)
 		delete(s.currentCommands, c.ID)
@@ -166,6 +182,26 @@ func (s *CommandServer) SendCommand(c *core.Command, bot *Bot) error {
 	}
 
 	return nil
+}
+
+func (s *CommandServer) ListBots() []*Bot {
+	s.RLock()
+	defer s.RUnlock()
+	bots := make([]*Bot, 0)
+	for _, bot := range s.bots {
+		bots = append(bots, bot)
+	}
+	return bots
+}
+
+func (s *CommandServer) ListCommands() []*core.Command {
+	s.RLock()
+	defer s.RUnlock()
+	commands := make([]*core.Command, 0)
+	for _, command := range s.currentCommands {
+		commands = append(commands, command)
+	}
+	return commands
 }
 
 func (s *CommandServer) startHeartBeating() {
@@ -179,9 +215,9 @@ func (s *CommandServer) startHeartBeating() {
 	}()
 }
 
-func (s *CommandServer) Run() error {
+func (s *CommandServer) Run() {
 	http.HandleFunc("/in", s.entrypoint)
 	http.HandleFunc("/out", s.feedback)
 	s.startHeartBeating()
-	return http.ListenAndServe(s.addr, nil)
+	log.Fatal(http.ListenAndServe(s.addr, nil))
 }
