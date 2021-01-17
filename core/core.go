@@ -44,7 +44,10 @@ func NewCommand(name string, args ...interface{}) *Command {
 }
 
 func (c *Command) String() string {
-	return fmt.Sprintf("%s <%s>", c.Name, c.state)
+	if c.state != "" {
+		return fmt.Sprintf("%s <%s>", c.Name, c.state)
+	}
+	return c.Name
 }
 
 func (c *Command) SetState(state CommandState) {
@@ -55,7 +58,7 @@ func (c *Command) SetState(state CommandState) {
 
 func (c *Command) State() CommandState {
 	c.RLock()
-	defer c.Unlock()
+	defer c.RUnlock()
 	return c.state
 }
 
@@ -67,6 +70,6 @@ func (c *Command) SetTarget(botId string) {
 
 func (c *Command) Target() string {
 	c.RLock()
-	defer c.Unlock()
+	defer c.RUnlock()
 	return c.targetId
 }

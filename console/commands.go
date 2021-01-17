@@ -11,14 +11,14 @@ import (
 
 func (c *Console) initCommands() {
 	c.commandsHandlers = map[*regexp.Regexp]func([]string) error{
-		regexp.MustCompile("help *"):        c.HelpCmdHandler,
-		regexp.MustCompile("exit *"):        c.ExitCmdHandler,
-		regexp.MustCompile("exec +(.+)"):    c.ExecCmdHandler,
-		regexp.MustCompile("ping *"):        c.PingCmdHandler,
-		regexp.MustCompile("list *"):        c.ListCmdHandler,
-		regexp.MustCompile("cmd_states *"):  c.ListCommandsStatesCmdHandler,
-		regexp.MustCompile("select (\\d+)"): c.SelectCmdHandler,
-		regexp.MustCompile("alias +(.+)"):   c.AliasCmdHandler,
+		regexp.MustCompile("help *"):       c.HelpCmdHandler,
+		regexp.MustCompile("exit *"):       c.ExitCmdHandler,
+		regexp.MustCompile("exec +(.+)"):   c.ExecCmdHandler,
+		regexp.MustCompile("ping *"):       c.PingCmdHandler,
+		regexp.MustCompile("list *"):       c.ListCmdHandler,
+		regexp.MustCompile("cmd_states *"): c.ListCommandsStatesCmdHandler,
+		regexp.MustCompile("use (\\d+)"):   c.UseCmdHandler,
+		regexp.MustCompile("alias +(.+)"):  c.AliasCmdHandler,
 	}
 }
 
@@ -29,7 +29,7 @@ ping				check if bot is alive
 list				list connected bots
 cmd_states			list commands states
 exec [command]			execute shell command
-select [bot number]		select bot to interact with
+use [bot number]		use bot to interact with
 alias [bot name]		set alias to bot
 	`)
 	return nil
@@ -70,7 +70,7 @@ func (c *Console) ListCommandsStatesCmdHandler(_ []string) error {
 		if command.Target() != currBot.ID {
 			continue
 		}
-		color.HiYellow(command.String())
+		color.HiYellow("%s %s", command.ID, command.String())
 	}
 	return nil
 }
@@ -115,7 +115,7 @@ func (c *Console) PingCmdHandler(_ []string) error {
 func (c *Console) ListCmdHandler(_ []string) error {
 	bots := c.srv.ListBots()
 	if len(bots) == 0 {
-		color.Yellow("there are no connected bots")
+		color.HiYellow("there are no connected bots")
 		return nil
 	}
 	c.Lock()
@@ -130,7 +130,7 @@ func (c *Console) ListCmdHandler(_ []string) error {
 	return nil
 }
 
-func (c *Console) SelectCmdHandler(matches []string) error {
+func (c *Console) UseCmdHandler(matches []string) error {
 	if len(matches) < 2 {
 		return fmt.Errorf("incorrect command format")
 	}
@@ -139,7 +139,7 @@ func (c *Console) SelectCmdHandler(matches []string) error {
 		return fmt.Errorf("incorrect index: %s", matches[1])
 	}
 	if index >= len(c.currentBotsList) {
-		return fmt.Errorf("index %d is out of range of bots list", index)
+		return fmt.Errorf("index %d is out of range of state list", index)
 	}
 	c.Lock()
 	c.currentBot = c.currentBotsList[index]

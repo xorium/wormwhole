@@ -128,4 +128,7 @@ fabric.properties
 
 # End of https://www.toptal.com/developers/gitignore/api/go,jetbrains
 
-*.gkvlite
+*.db
+srv
+cli
+.settings.json
